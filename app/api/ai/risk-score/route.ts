@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { openai } from '@/lib/openai/client'
+import { getOpenAI } from '@/lib/openai/client'
 import { SYSTEM_PROMPTS } from '@/lib/openai/prompts'
 
 export async function POST(request: NextRequest) {
@@ -17,7 +17,7 @@ Patient Data:
 
 Assess risk levels.`
 
-    const completion = await openai.chat.completions.create({
+    const completion = await getOpenAI().chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: SYSTEM_PROMPTS.riskScoring },
