@@ -33,7 +33,14 @@ export default function LoginPage() {
       return
     }
 
-    const role = data.user?.user_metadata?.role ?? 'patient'
+    // Read role from profiles table (reliable — not dependent on user_metadata)
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', data.user.id)
+      .single()
+
+    const role = profile?.role ?? data.user?.user_metadata?.role ?? 'patient'
     toast.success(`Welcome back! Redirecting to your dashboard...`)
     router.push(`/dashboard/${role}`)
     router.refresh()

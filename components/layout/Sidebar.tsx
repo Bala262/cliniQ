@@ -52,6 +52,7 @@ const NAV_ITEMS: Record<UserRole, NavItem[]> = {
     { label: 'My Prescriptions', href: '/dashboard/patient/my-prescriptions', icon: FileText },
     { label: 'My Lab Reports', href: '/dashboard/patient/my-reports', icon: FlaskConical },
     { label: 'Health Risk', href: '/dashboard/patient/health-risk', icon: Activity },
+    { label: 'Settings', href: '/dashboard/patient/settings', icon: Settings },
   ],
 }
 

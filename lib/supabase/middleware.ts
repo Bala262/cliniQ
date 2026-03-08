@@ -42,21 +42,27 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
-  // Get user role from metadata
-  const role = user.user_metadata?.role as string | undefined
+  // Read role from profiles table (ground truth) — fallback to user_metadata
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  const role = profile?.role ?? (user.user_metadata?.role as string | undefined) ?? 'patient'
 
   // Role-based route protection
   if (pathname.startsWith('/dashboard/doctor') && role !== 'doctor') {
-    return NextResponse.redirect(new URL(`/dashboard/${role ?? 'patient'}`, request.url))
+    return NextResponse.redirect(new URL(`/dashboard/${role}`, request.url))
   }
   if (pathname.startsWith('/dashboard/admin') && role !== 'admin') {
-    return NextResponse.redirect(new URL(`/dashboard/${role ?? 'patient'}`, request.url))
+    return NextResponse.redirect(new URL(`/dashboard/${role}`, request.url))
   }
   if (pathname.startsWith('/dashboard/receptionist') && role !== 'receptionist') {
-    return NextResponse.redirect(new URL(`/dashboard/${role ?? 'patient'}`, request.url))
+    return NextResponse.redirect(new URL(`/dashboard/${role}`, request.url))
   }
   if (pathname.startsWith('/dashboard/patient') && role !== 'patient') {
-    return NextResponse.redirect(new URL(`/dashboard/${role ?? 'doctor'}`, request.url))
+    return NextResponse.redirect(new URL(`/dashboard/${role}`, request.url))
   }
 
   return supabaseResponse

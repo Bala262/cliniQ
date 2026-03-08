@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useRef } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -18,71 +18,73 @@ interface Props {
 
 export function VoiceInputPanel({ transcript, onTranscriptChange, onExtractSymptoms, isExtracting }: Props) {
   const [isListening, setIsListening] = useState(false)
-  const [liveText, setLiveText] = useState('')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const recognitionRef = useRef<any>(null)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
 
-  useEffect(() => {
-    return () => {
-      recognitionRef.current?.stop()
-    }
-  }, [])
+  async function startListening() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      audioChunksRef.current = []
 
-  function startListening() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const w = window as any
-    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition
-
-    if (!SpeechRecognitionAPI) {
-      toast.error('Voice input not supported in this browser. Please use Chrome.')
-      return
-    }
-
-    const recognition = new SpeechRecognitionAPI()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-IN'
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onresult = (event: any) => {
-      let interimTranscript = ''
-      let finalTranscript = ''
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i]
-        if (result.isFinal) {
-          finalTranscript += result[0].transcript + ' '
-        } else {
-          interimTranscript += result[0].transcript
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
         }
       }
 
-      if (finalTranscript) {
-        onTranscriptChange(transcript + finalTranscript)
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop())
+        await sendToWhisper()
       }
-      setLiveText(interimTranscript)
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    recognition.onerror = (event: any) => {
-      console.error('Speech recognition error:', event.error)
-      setIsListening(false)
+      mediaRecorder.start()
+      mediaRecorderRef.current = mediaRecorder
+      setIsListening(true)
+    } catch {
+      toast.error('Microphone access denied. Please allow microphone permission.')
     }
-
-    recognition.onend = () => {
-      setIsListening(false)
-      setLiveText('')
-    }
-
-    recognitionRef.current = recognition
-    recognition.start()
-    setIsListening(true)
   }
 
   function stopListening() {
-    recognitionRef.current?.stop()
+    mediaRecorderRef.current?.stop()
     setIsListening(false)
-    setLiveText('')
+  }
+
+  async function sendToWhisper() {
+    if (audioChunksRef.current.length === 0) return
+
+    setIsTranscribing(true)
+    try {
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+      const formData = new FormData()
+      formData.append('audio', audioBlob, 'recording.webm')
+
+      const response = await fetch('/api/ai/transcribe-audio', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error('Transcription request failed')
+      }
+
+      const data = await response.json()
+      const newText = data.transcript?.trim()
+
+      if (newText) {
+        onTranscriptChange(transcript ? `${transcript} ${newText}` : newText)
+      } else {
+        toast.error('No speech detected. Please try again.')
+      }
+    } catch (error) {
+      console.error('Whisper transcription error:', error)
+      toast.error('Transcription failed. Please try again.')
+    } finally {
+      setIsTranscribing(false)
+      audioChunksRef.current = []
+    }
   }
 
   return (
@@ -97,6 +99,12 @@ export function VoiceInputPanel({ transcript, onTranscriptChange, onExtractSympt
             ● Recording...
           </Badge>
         )}
+        {isTranscribing && (
+          <Badge className="bg-amber-100 text-amber-600 text-xs animate-pulse">
+            <Loader2 className="h-3 w-3 mr-1 animate-spin inline" />
+            Transcribing...
+          </Badge>
+        )}
       </CardHeader>
       <CardContent className="p-3 pt-0 space-y-3">
         {/* Controls */}
@@ -106,6 +114,7 @@ export function VoiceInputPanel({ transcript, onTranscriptChange, onExtractSympt
               size="sm"
               className="bg-red-500 hover:bg-red-600 text-white h-8 text-xs"
               onClick={startListening}
+              disabled={isTranscribing}
             >
               <Mic className="h-3.5 w-3.5 mr-1.5" />
               Start Recording
@@ -122,13 +131,6 @@ export function VoiceInputPanel({ transcript, onTranscriptChange, onExtractSympt
             </Button>
           )}
         </div>
-
-        {/* Live interim text */}
-        {liveText && (
-          <p className="text-xs text-slate-400 italic animate-pulse px-1">
-            {liveText}
-          </p>
-        )}
 
         {/* Transcript area */}
         <Textarea
