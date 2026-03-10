@@ -1,247 +1,370 @@
--- CLINIQ-AI+ Supabase Schema
--- Run this in Supabase SQL Editor
+-- ============================================================
+-- CLINIQ-AI+ v2.0 — Complete Supabase Schema
+-- Run this in the Supabase SQL Editor (Dashboard → SQL Editor)
+-- ============================================================
 
--- 1. Profiles (extends auth.users)
-CREATE TABLE IF NOT EXISTS public.profiles (
-  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  full_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('doctor','admin','receptionist','patient')),
-  phone TEXT,
-  specialization TEXT,
-  license_number TEXT,
-  avatar_url TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- Enable UUID extension
+create extension if not exists "uuid-ossp";
+
+-- ============================================================
+-- PROFILES TABLE (extends Supabase Auth users)
+-- ============================================================
+create table if not exists profiles (
+  id uuid references auth.users(id) on delete cascade primary key,
+  full_name text not null,
+  role text not null check (role in (
+    'doctor', 'visiting_doctor', 'nurse', 'lab', 'pharmacy',
+    'billing', 'receptionist', 'admin'
+  )),
+  phone text,
+  specialization text,
+  license_number text,
+  department text,
+  avatar_url text,
+  is_active boolean default true,
+  created_at timestamptz default now()
 );
 
--- 2. Patients
-CREATE TABLE IF NOT EXISTS public.patients (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_code TEXT UNIQUE NOT NULL,
-  full_name TEXT NOT NULL,
-  age INT,
-  gender TEXT CHECK (gender IN ('male','female','other')),
-  phone TEXT UNIQUE NOT NULL,
-  address TEXT,
-  blood_group TEXT,
-  allergies TEXT[] DEFAULT '{}',
-  chronic_conditions TEXT[] DEFAULT '{}',
-  emergency_contact TEXT,
-  risk_level TEXT DEFAULT 'low' CHECK (risk_level IN ('low','medium','high')),
-  profile_id UUID REFERENCES public.profiles(id),
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- Auto-create profile on signup
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, full_name, role)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'full_name', new.email),
+    coalesce(new.raw_user_meta_data->>'role', 'receptionist')
+  );
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
+-- ============================================================
+-- PATIENTS TABLE
+-- ============================================================
+create table if not exists patients (
+  id uuid default uuid_generate_v4() primary key,
+  patient_code text unique not null,
+  full_name text not null,
+  age integer not null check (age > 0 and age < 150),
+  gender text not null check (gender in ('male', 'female', 'other')),
+  phone text not null,
+  address text,
+  blood_group text check (blood_group in ('A+','A-','B+','B-','AB+','AB-','O+','O-')),
+  allergies text[] default '{}',
+  chronic_conditions text[] default '{}',
+  emergency_contact text,
+  risk_level text default 'low' check (risk_level in ('low', 'medium', 'high')),
+  profile_id uuid references profiles(id) on delete set null,
+  created_at timestamptz default now()
 );
 
--- 3. Appointments
-CREATE TABLE IF NOT EXISTS public.appointments (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  doctor_id UUID NOT NULL REFERENCES public.profiles(id),
-  date DATE NOT NULL,
-  time_slot TEXT NOT NULL,
-  consultation_type TEXT DEFAULT 'general' CHECK (consultation_type IN ('general','follow-up','emergency')),
-  status TEXT DEFAULT 'scheduled' CHECK (status IN ('scheduled','waiting','in-consultation','completed','cancelled')),
-  token_number INT,
-  reminder_sent BOOLEAN DEFAULT FALSE,
-  notes TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- Auto-generate patient code
+create or replace function generate_patient_code()
+returns trigger language plpgsql as $$
+declare
+  new_code text;
+  counter integer;
+begin
+  select count(*) + 1 into counter from patients;
+  new_code := 'PT' || lpad(counter::text, 5, '0');
+  new.patient_code := new_code;
+  return new;
+end;
+$$;
+
+drop trigger if exists set_patient_code on patients;
+create trigger set_patient_code
+  before insert on patients
+  for each row execute procedure generate_patient_code();
+
+-- ============================================================
+-- APPOINTMENTS TABLE
+-- ============================================================
+create table if not exists appointments (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  doctor_id uuid references profiles(id) on delete cascade not null,
+  nurse_id uuid references profiles(id) on delete set null,
+  date date not null,
+  time_slot text not null,
+  consultation_type text default 'general' check (consultation_type in ('general','follow-up','emergency')),
+  status text default 'scheduled' check (status in (
+    'scheduled','waiting','with_nurse','ready_for_doctor','in-consultation','completed','cancelled'
+  )),
+  token_number integer,
+  reminder_sent boolean default false,
+  notes text,
+  created_at timestamptz default now()
 );
 
--- 4. Consultations
-CREATE TABLE IF NOT EXISTS public.consultations (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  doctor_id UUID NOT NULL REFERENCES public.profiles(id),
-  appointment_id UUID REFERENCES public.appointments(id),
-  date TIMESTAMPTZ DEFAULT NOW(),
-  voice_transcript TEXT,
-  extracted_symptoms JSONB DEFAULT '[]',
-  diagnosis_suggestions JSONB DEFAULT '[]',
-  final_diagnosis TEXT,
-  ai_explanation TEXT,
-  recommended_tests TEXT[] DEFAULT '{}',
-  doctor_notes TEXT,
-  status TEXT DEFAULT 'active' CHECK (status IN ('active','completed')),
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- VITALS TABLE
+-- ============================================================
+create table if not exists vitals (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  appointment_id uuid references appointments(id) on delete set null,
+  recorded_by uuid references profiles(id) on delete set null,
+  temperature numeric(4,1),
+  bp_systolic integer,
+  bp_diastolic integer,
+  heart_rate integer,
+  oxygen_saturation numeric(4,1),
+  height numeric(5,1),
+  weight numeric(5,1),
+  bmi numeric(4,1),
+  recorded_at timestamptz default now()
 );
 
--- 5. Prescriptions
-CREATE TABLE IF NOT EXISTS public.prescriptions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  consultation_id UUID REFERENCES public.consultations(id),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  doctor_id UUID NOT NULL REFERENCES public.profiles(id),
-  medicines JSONB NOT NULL DEFAULT '[]',
-  interaction_warnings JSONB DEFAULT '[]',
-  allergy_alerts TEXT[] DEFAULT '{}',
-  pdf_url TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- CONSULTATIONS TABLE
+-- ============================================================
+create table if not exists consultations (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  doctor_id uuid references profiles(id) on delete cascade not null,
+  appointment_id uuid references appointments(id) on delete set null,
+  date date default current_date,
+  voice_transcript text,
+  extracted_symptoms jsonb default '[]',
+  diagnosis_suggestions jsonb default '[]',
+  final_diagnosis text,
+  ai_explanation text,
+  recommended_tests text[] default '{}',
+  doctor_notes text,
+  status text default 'active' check (status in ('active','completed')),
+  created_at timestamptz default now()
 );
 
--- 6. Lab Reports
-CREATE TABLE IF NOT EXISTS public.lab_reports (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  uploaded_by UUID REFERENCES public.profiles(id),
-  file_url TEXT NOT NULL,
-  file_name TEXT NOT NULL,
-  extracted_values JSONB DEFAULT '[]',
-  ai_summary TEXT,
-  uploaded_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- PRESCRIPTIONS TABLE
+-- ============================================================
+create table if not exists prescriptions (
+  id uuid default uuid_generate_v4() primary key,
+  consultation_id uuid references consultations(id) on delete set null,
+  patient_id uuid references patients(id) on delete cascade not null,
+  doctor_id uuid references profiles(id) on delete cascade not null,
+  medicines jsonb not null default '[]',
+  interaction_warnings jsonb default '[]',
+  allergy_alerts text[] default '{}',
+  pdf_url text,
+  status text default 'pending' check (status in ('pending','dispensed','partial')),
+  created_at timestamptz default now()
 );
 
--- 7. Vitals
-CREATE TABLE IF NOT EXISTS public.vitals (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  recorded_by UUID REFERENCES public.profiles(id),
-  bp_systolic INT,
-  bp_diastolic INT,
-  heart_rate INT,
-  temperature DECIMAL(4,1),
-  oxygen_saturation INT,
-  weight DECIMAL(5,2),
-  bmi DECIMAL(4,1),
-  recorded_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- LAB ORDERS TABLE
+-- ============================================================
+create table if not exists lab_orders (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  doctor_id uuid references profiles(id) on delete cascade not null,
+  appointment_id uuid references appointments(id) on delete set null,
+  test_type text not null,
+  priority text default 'normal' check (priority in ('normal','high','urgent')),
+  status text default 'pending' check (status in ('pending','sample_collected','processing','completed')),
+  notes text,
+  created_at timestamptz default now()
 );
 
--- 8. Billing
-CREATE TABLE IF NOT EXISTS public.billing (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  consultation_id UUID REFERENCES public.consultations(id),
-  consultation_fee DECIMAL(10,2) DEFAULT 0,
-  lab_charges DECIMAL(10,2) DEFAULT 0,
-  medicine_charges DECIMAL(10,2) DEFAULT 0,
-  total DECIMAL(10,2) DEFAULT 0,
-  payment_mode TEXT CHECK (payment_mode IN ('cash','upi','card')),
-  payment_status TEXT DEFAULT 'pending' CHECK (payment_status IN ('pending','paid','partial')),
-  invoice_number TEXT UNIQUE NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- LAB REPORTS TABLE
+-- ============================================================
+create table if not exists lab_reports (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  lab_order_id uuid references lab_orders(id) on delete set null,
+  uploaded_by uuid references profiles(id) on delete set null,
+  file_url text not null,
+  file_name text not null,
+  extracted_values jsonb default '[]',
+  ai_summary text,
+  is_approved boolean default false,
+  approved_by uuid references profiles(id) on delete set null,
+  uploaded_at timestamptz default now()
 );
 
--- 9. AI Alerts
-CREATE TABLE IF NOT EXISTS public.ai_alerts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  patient_id UUID NOT NULL REFERENCES public.patients(id) ON DELETE CASCADE,
-  alert_type TEXT NOT NULL CHECK (alert_type IN ('drug_interaction','high_risk','abnormal_lab','overdue_followup','emergency')),
-  message TEXT NOT NULL,
-  severity TEXT DEFAULT 'medium' CHECK (severity IN ('low','medium','high','critical')),
-  is_resolved BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+-- ============================================================
+-- WARD BEDS TABLE
+-- ============================================================
+create table if not exists ward_beds (
+  id uuid default uuid_generate_v4() primary key,
+  bed_number text unique not null,
+  ward_name text default 'General Ward',
+  status text default 'available' check (status in ('available','occupied','cleaning','reserved')),
+  patient_id uuid references patients(id) on delete set null,
+  doctor_id uuid references profiles(id) on delete set null,
+  diagnosis text,
+  admission_date date,
+  discharge_date date,
+  notes text,
+  updated_at timestamptz default now()
 );
 
--- =====================
--- Row Level Security
--- =====================
+-- Seed 10 beds
+insert into ward_beds (bed_number) values
+  ('Bed 1'), ('Bed 2'), ('Bed 3'), ('Bed 4'), ('Bed 5'),
+  ('Bed 6'), ('Bed 7'), ('Bed 8'), ('Bed 9'), ('Bed 10')
+on conflict (bed_number) do nothing;
 
-ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.patients ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.consultations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.lab_reports ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.vitals ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.billing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.ai_alerts ENABLE ROW LEVEL SECURITY;
+-- ============================================================
+-- PHARMACY INVENTORY TABLE
+-- ============================================================
+create table if not exists pharmacy_inventory (
+  id uuid default uuid_generate_v4() primary key,
+  medicine_name text not null,
+  generic_name text,
+  category text,
+  stock_quantity integer not null default 0 check (stock_quantity >= 0),
+  unit text default 'Tablets',
+  expiry_date date not null,
+  supplier text,
+  unit_price numeric(10,2) not null default 0,
+  reorder_level integer default 50,
+  batch_number text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
 
--- Profiles: each user can read all, write own
-CREATE POLICY "profiles_read_all" ON public.profiles FOR SELECT USING (true);
-CREATE POLICY "profiles_write_own" ON public.profiles FOR ALL USING (auth.uid() = id);
+-- ============================================================
+-- PHARMACY DISPENSING TABLE
+-- ============================================================
+create table if not exists pharmacy_dispensing (
+  id uuid default uuid_generate_v4() primary key,
+  prescription_id uuid references prescriptions(id) on delete set null,
+  pharmacist_id uuid references profiles(id) on delete set null,
+  patient_id uuid references patients(id) on delete cascade not null,
+  medicines_dispensed jsonb not null default '[]',
+  total_amount numeric(10,2) default 0,
+  dispensed_at timestamptz default now()
+);
 
--- Patients: staff can read/write all; patient can read own
-CREATE POLICY "patients_staff_all" ON public.patients FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
-CREATE POLICY "patients_read_own" ON public.patients FOR SELECT
-  USING (profile_id = auth.uid());
+-- ============================================================
+-- BILLING TABLE
+-- ============================================================
+create table if not exists billing (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  consultation_id uuid references consultations(id) on delete set null,
+  appointment_id uuid references appointments(id) on delete set null,
+  invoice_number text unique not null,
+  consultation_fee numeric(10,2) default 0,
+  lab_charges numeric(10,2) default 0,
+  medicine_charges numeric(10,2) default 0,
+  ward_charges numeric(10,2) default 0,
+  total numeric(10,2) generated always as (
+    consultation_fee + lab_charges + medicine_charges + ward_charges
+  ) stored,
+  payment_mode text check (payment_mode in ('cash','upi','card','insurance')),
+  payment_status text default 'pending' check (payment_status in ('pending','paid','partial')),
+  insurance_provider text,
+  insurance_claim_id text,
+  created_at timestamptz default now(),
+  paid_at timestamptz
+);
 
--- Appointments: staff full access; patient reads own
-CREATE POLICY "appointments_staff_all" ON public.appointments FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
-CREATE POLICY "appointments_patient_read" ON public.appointments FOR SELECT
-  USING (
-    EXISTS (SELECT 1 FROM public.patients WHERE id = patient_id AND profile_id = auth.uid())
-  );
+-- Auto-generate invoice number
+create or replace function generate_invoice_number()
+returns trigger language plpgsql as $$
+declare
+  counter integer;
+begin
+  select count(*) + 2598 into counter from billing;
+  new.invoice_number := 'INV-' || counter::text;
+  return new;
+end;
+$$;
 
--- Consultations: doctor + admin full; patient reads own
-CREATE POLICY "consultations_staff_all" ON public.consultations FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin'))
-  );
-CREATE POLICY "consultations_patient_read" ON public.consultations FOR SELECT
-  USING (
-    EXISTS (SELECT 1 FROM public.patients WHERE id = patient_id AND profile_id = auth.uid())
-  );
+drop trigger if exists set_invoice_number on billing;
+create trigger set_invoice_number
+  before insert on billing
+  for each row execute procedure generate_invoice_number();
 
--- Prescriptions: doctor/admin write; receptionist read; patient reads own
-CREATE POLICY "prescriptions_doctor_all" ON public.prescriptions FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
-CREATE POLICY "prescriptions_patient_read" ON public.prescriptions FOR SELECT
-  USING (
-    EXISTS (SELECT 1 FROM public.patients WHERE id = patient_id AND profile_id = auth.uid())
-  );
+-- ============================================================
+-- AI ALERTS TABLE
+-- ============================================================
+create table if not exists ai_alerts (
+  id uuid default uuid_generate_v4() primary key,
+  patient_id uuid references patients(id) on delete cascade not null,
+  alert_type text not null check (alert_type in (
+    'drug_interaction','high_risk','abnormal_lab','overdue_followup','emergency'
+  )),
+  message text not null,
+  severity text default 'medium' check (severity in ('low','medium','high','critical')),
+  is_resolved boolean default false,
+  resolved_by uuid references profiles(id) on delete set null,
+  created_at timestamptz default now()
+);
 
--- Lab Reports: staff full; patient reads own
-CREATE POLICY "lab_reports_staff_all" ON public.lab_reports FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
-CREATE POLICY "lab_reports_patient_read" ON public.lab_reports FOR SELECT
-  USING (
-    EXISTS (SELECT 1 FROM public.patients WHERE id = patient_id AND profile_id = auth.uid())
-  );
+-- ============================================================
+-- ROW LEVEL SECURITY (RLS) POLICIES
+-- ============================================================
 
--- Vitals: staff full access
-CREATE POLICY "vitals_staff_all" ON public.vitals FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
+alter table profiles enable row level security;
+alter table patients enable row level security;
+alter table appointments enable row level security;
+alter table vitals enable row level security;
+alter table consultations enable row level security;
+alter table prescriptions enable row level security;
+alter table lab_orders enable row level security;
+alter table lab_reports enable row level security;
+alter table ward_beds enable row level security;
+alter table pharmacy_inventory enable row level security;
+alter table pharmacy_dispensing enable row level security;
+alter table billing enable row level security;
+alter table ai_alerts enable row level security;
 
--- Billing: receptionist + admin full; patient reads own
-CREATE POLICY "billing_staff_all" ON public.billing FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('admin','receptionist'))
-  );
-CREATE POLICY "billing_patient_read" ON public.billing FOR SELECT
-  USING (
-    EXISTS (SELECT 1 FROM public.patients WHERE id = patient_id AND profile_id = auth.uid())
-  );
+-- Profiles: users can read all profiles, update own
+create policy "profiles_select" on profiles for select using (true);
+create policy "profiles_update_own" on profiles for update using (auth.uid() = id);
 
--- AI Alerts: staff full access
-CREATE POLICY "alerts_staff_all" ON public.ai_alerts FOR ALL
-  USING (
-    EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role IN ('doctor','admin','receptionist'))
-  );
+-- Patients: all authenticated users can read/insert
+create policy "patients_select" on patients for select using (auth.role() = 'authenticated');
+create policy "patients_insert" on patients for insert with check (auth.role() = 'authenticated');
+create policy "patients_update" on patients for update using (auth.role() = 'authenticated');
 
--- =====================
--- Trigger: auto-create profile on signup
--- =====================
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
-BEGIN
-  INSERT INTO public.profiles (id, full_name, role)
-  VALUES (
-    NEW.id,
-    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email),
-    COALESCE(NEW.raw_user_meta_data->>'role', 'patient')
-  )
-  ON CONFLICT (id) DO NOTHING;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+-- Appointments: all authenticated
+create policy "appointments_all" on appointments for all using (auth.role() = 'authenticated');
 
-CREATE OR REPLACE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+-- Vitals: nurses and doctors
+create policy "vitals_all" on vitals for all using (auth.role() = 'authenticated');
 
--- =====================
--- Storage Buckets (run in Supabase dashboard > Storage)
--- =====================
--- INSERT INTO storage.buckets (id, name, public) VALUES ('lab-reports', 'lab-reports', false);
--- INSERT INTO storage.buckets (id, name, public) VALUES ('prescriptions', 'prescriptions', false);
--- INSERT INTO storage.buckets (id, name, public) VALUES ('avatars', 'avatars', true);
+-- Consultations: doctors only (insert/update), all read
+create policy "consultations_select" on consultations for select using (auth.role() = 'authenticated');
+create policy "consultations_insert" on consultations for insert with check (auth.role() = 'authenticated');
+create policy "consultations_update" on consultations for update using (auth.role() = 'authenticated');
+
+-- Prescriptions: authenticated
+create policy "prescriptions_all" on prescriptions for all using (auth.role() = 'authenticated');
+
+-- Lab orders and reports: authenticated
+create policy "lab_orders_all" on lab_orders for all using (auth.role() = 'authenticated');
+create policy "lab_reports_all" on lab_reports for all using (auth.role() = 'authenticated');
+
+-- Ward beds: authenticated
+create policy "ward_beds_all" on ward_beds for all using (auth.role() = 'authenticated');
+
+-- Pharmacy: authenticated
+create policy "pharmacy_inventory_all" on pharmacy_inventory for all using (auth.role() = 'authenticated');
+create policy "pharmacy_dispensing_all" on pharmacy_dispensing for all using (auth.role() = 'authenticated');
+
+-- Billing: authenticated
+create policy "billing_all" on billing for all using (auth.role() = 'authenticated');
+
+-- AI alerts: authenticated
+create policy "ai_alerts_all" on ai_alerts for all using (auth.role() = 'authenticated');
+
+-- ============================================================
+-- STORAGE BUCKETS
+-- Run these in Supabase Dashboard → Storage
+-- ============================================================
+-- insert into storage.buckets (id, name, public) values ('lab-reports', 'lab-reports', false);
+-- insert into storage.buckets (id, name, public) values ('prescriptions', 'prescriptions', false);
+-- insert into storage.buckets (id, name, public) values ('avatars', 'avatars', true);

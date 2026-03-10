@@ -40,9 +40,13 @@ export default function LoginPage() {
       .eq('id', data.user.id)
       .single()
 
-    const role = profile?.role ?? data.user?.user_metadata?.role ?? 'patient'
+    const role = profile?.role ?? data.user?.user_metadata?.role ?? 'receptionist'
+    const rolePathMap: Record<string, string> = {
+      visiting_doctor: '/dashboard/visiting-doctor',
+    }
+    const dashboardPath = rolePathMap[role] ?? `/dashboard/${role}`
     toast.success(`Welcome back! Redirecting to your dashboard...`)
-    router.push(`/dashboard/${role}`)
+    router.push(dashboardPath)
     router.refresh()
   }
 
@@ -123,11 +127,15 @@ export default function LoginPage() {
             {/* Demo credentials */}
             <div className="mt-6 p-3 bg-slate-50 rounded-lg border border-slate-200">
               <p className="text-xs font-semibold text-slate-600 mb-2">Demo Accounts:</p>
-              <div className="space-y-1 text-xs text-slate-500">
-                <p><span className="font-medium text-blue-600">Doctor:</span> doctor@cliniq.demo / Demo@1234</p>
-                <p><span className="font-medium text-purple-600">Admin:</span> admin@cliniq.demo / Demo@1234</p>
-                <p><span className="font-medium text-green-600">Reception:</span> reception@cliniq.demo / Demo@1234</p>
-                <p><span className="font-medium text-orange-600">Patient:</span> patient@cliniq.demo / Demo@1234</p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500">
+                <p><span className="font-medium text-blue-600">Doctor:</span> doctor@cliniq.demo</p>
+                <p><span className="font-medium text-purple-600">Nurse:</span> nurse@cliniq.demo</p>
+                <p><span className="font-medium text-amber-600">Lab Tech:</span> lab@cliniq.demo</p>
+                <p><span className="font-medium text-emerald-600">Pharmacy:</span> pharmacy@cliniq.demo</p>
+                <p><span className="font-medium text-rose-600">Billing:</span> billing@cliniq.demo</p>
+                <p><span className="font-medium text-cyan-600">Reception:</span> reception@cliniq.demo</p>
+                <p><span className="font-medium text-violet-600">Admin:</span> admin@cliniq.demo</p>
+                <p className="col-span-2 text-[10px] text-slate-400 mt-1">All passwords: Demo@1234</p>
               </div>
             </div>
           </CardContent>
